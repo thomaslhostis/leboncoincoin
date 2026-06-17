@@ -32,6 +32,27 @@ Reçois une notification dès qu'une nouvelle annonce apparaît sur n'importe qu
 > ⚠️ La fréquence minimale est **1 minute** (limite imposée par Chrome).  
 > Certains sites peuvent détecter les requêtes automatiques et retourner une page vide ou un CAPTCHA.
 
+## Captcha & indicateur d'état
+
+- Quand leboncoin est **injoignable pour n'importe quelle raison** (captcha, réseau,
+  erreur serveur), un **triangle d'avertissement** se superpose à l'icône de l'extension.
+- Une **notification** n'est envoyée que pour un **captcha** à résoudre (une seule,
+  globale pour toutes les surveillances). Les erreurs réseau restent silencieuses.
+- L'avertissement disparaît dès que leboncoin redevient accessible (vérification
+  réussie, ou détection d'un onglet leboncoin valide).
+
+## Tests
+
+Tests automatisés via le runner intégré de Node (aucune dépendance) :
+
+```bash
+node --test        # ou : npm test
+```
+
+Ils couvrent l'escalade `fetch → iframe → rendu`, la détection de captcha sans
+onglet, la garde réseau, la notification unique, le son limité aux nouvelles
+annonces, et la logique de l'icône d'avertissement.
+
 ## Structure
 
 ```

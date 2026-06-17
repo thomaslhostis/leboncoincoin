@@ -34,7 +34,9 @@
   };
 
   if (!el) {
-    send({ ok: false, error: 'pas de __NEXT_DATA__ (challenge Cloudflare ?)' });
+    // Page chargée dans l'iframe mais sans __NEXT_DATA__ = page de challenge/captcha
+    // (Cloudflare, DataDome…). On le signale explicitement (challenge:true).
+    send({ ok: false, challenge: true, error: 'pas de __NEXT_DATA__ (page de challenge/captcha)' });
     return;
   }
 

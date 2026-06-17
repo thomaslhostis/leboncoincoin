@@ -1,0 +1,9 @@
+{
+  "name": "leboncoincoin-extension",
+  "version": "1.8.0",
+  "private": true,
+  "description": "Tests automatisés de l'extension Leboncoincoin (runner Node intégré, sans dépendance).",
+  "scripts": {
+    "test": "node --test"
+  }
+}

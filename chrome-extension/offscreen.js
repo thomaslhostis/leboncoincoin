@@ -16,7 +16,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === 'RENEW_VIA_IFRAME') {
     renewViaIframe(msg.url)
       .then((data) => reply({ ok: true, data }))
-      .catch((e) => reply({ ok: false, error: e.message }));
+      .catch((e) => reply({ ok: false, error: e.message, captcha: !!e.captcha }));
     return true; // réponse asynchrone
   }
 
@@ -64,20 +64,23 @@ async function doRenewViaIframe(url) {
       return cs.data;
     }
 
-    if (cs && !cs.ok) {
-      console.warn(`[LBC][iframe] content-script présent mais sans annonces : « ${cs.error} » (loads=${loadCount}) — Cloudflare a probablement servi un challenge dans l'iframe`);
-    } else {
-      console.warn(`[LBC][iframe] aucun message du content-script (loads=${loadCount}) — soit l'iframe n'a pas chargé (X-Frame-Options non retiré ?), soit les content-scripts ne s'injectent pas dans une iframe offscreen`);
-    }
-
     // Repli : le cookie a peut-être quand même été renouvelé → re-fetch direct.
     try {
       const data = await fetchAndParse(url);
       console.log('[LBC][iframe] ✓ lu via re-fetch après passage iframe');
       return data;
     } catch (e) {
-      const why = cs && !cs.ok ? cs.error : 'pas de content-script';
-      throw new Error(`iframe inopérante (${why}) ; re-fetch: ${e.message}`);
+      if (cs && cs.challenge) {
+        // Le content-script a chargé la page DANS l'iframe mais sans __NEXT_DATA__ :
+        // c'est une page de challenge/captcha. Détecté SANS aucun onglet.
+        console.warn(`[LBC][iframe] challenge détecté via content-script (loads=${loadCount}) — captcha à résoudre`);
+        const err = new Error(`challenge détecté dans l'iframe (${cs.error})`);
+        err.captcha = true;
+        throw err;
+      }
+      // Pas de content-script du tout → non concluant : on laisse le rendu réel décider.
+      console.warn(`[LBC][iframe] aucun message du content-script (loads=${loadCount}) ; re-fetch: ${e.message}`);
+      throw new Error(`iframe inopérante (pas de content-script) ; re-fetch: ${e.message}`);
     }
   } finally {
     setTimeout(() => iframe.remove(), 500); // libère la mémoire

@@ -221,18 +221,25 @@ const DEFAULT_ICON_PATHS = {
 };
 
 /**
- * Recalcule l'état captcha global à partir des surveillances :
- *  • icône d'avertissement si au moins une surveillance active est bloquée ;
- *  • UNE SEULE notification pour l'ensemble des alertes (dédup via un flag global).
+ * Recalcule l'état global à partir des surveillances :
+ *  • icône d'avertissement dès qu'une surveillance active est en échec (leboncoin
+ *    injoignable, quelle qu'en soit la raison : captcha, réseau, erreur serveur) ;
+ *  • UNE SEULE notification pour l'ensemble des alertes, réservée au cas captcha
+ *    (dédup via un flag global).
  */
 async function refreshCaptchaState() {
   const { monitors = [], [KEY_CAPTCHA_NOTIF]: alreadyNotified = false } =
     await chrome.storage.local.get([KEY_MONITORS, KEY_CAPTCHA_NOTIF]);
-  const blocked = monitors.filter((m) => m.enabled !== false && m.captchaNotified);
+  const active = monitors.filter((m) => m.enabled !== false);
+  const blocked = active.filter((m) => m.captchaNotified);
   const anyBlocked = blocked.length > 0;
+  // Triangle d'avertissement dès que leboncoin est injoignable, QUELLE QU'EN SOIT
+  // la raison (captcha, réseau, erreur serveur…), c.-à-d. dernière vérif en échec.
+  const anyError = active.some((m) => m.lastError);
 
-  await setActionWarning(anyBlocked);
+  await setActionWarning(anyError);
 
+  // La notification, elle, reste réservée au seul cas captcha (et globale/unique).
   if (anyBlocked && !alreadyNotified) {
     await sendNotification(
       'captcha',
@@ -253,18 +260,20 @@ let clearCaptchaTimer = null;
 async function onLeboncoinAccessible() {
   if (clearCaptchaTimer) return; // effacement déjà programmé
   const { monitors = [] } = await chrome.storage.local.get(KEY_MONITORS);
-  if (!monitors.some((m) => m.enabled !== false && m.captchaNotified)) return; // rien à effacer
+  // Rien à faire si aucune surveillance active n'est en erreur/captcha.
+  if (!monitors.some((m) => m.enabled !== false && (m.lastError || m.captchaNotified))) return;
   clearCaptchaTimer = setTimeout(() => {
     clearCaptchaTimer = null;
-    clearAllCaptcha().catch(() => {});
+    clearWarningState().catch(() => {});
   }, 4000);
 }
 
-async function clearAllCaptcha() {
+async function clearWarningState() {
   const { monitors = [] } = await chrome.storage.local.get(KEY_MONITORS);
-  if (monitors.some((m) => m.captchaNotified)) {
+  if (monitors.some((m) => m.captchaNotified || m.lastError)) {
     await chrome.storage.local.set({
-      [KEY_MONITORS]: monitors.map((m) => (m.captchaNotified ? { ...m, captchaNotified: false } : m)),
+      [KEY_MONITORS]: monitors.map((m) =>
+        (m.captchaNotified || m.lastError) ? { ...m, captchaNotified: false, lastError: null } : m),
     });
   }
   await refreshCaptchaState(); // retire l'icône + remet le flag global à false
@@ -400,54 +409,59 @@ async function ensureOffscreenDocument() {
 }
 
 async function fetchLeboncoinAds(url) {
-  // On retient si un niveau a vu une page de challenge Cloudflare : si tous
-  // échouent, c'est qu'un captcha interactif est requis (à résoudre à la main).
-  let sawChallenge = false;
-
   // ── 1. Voie rapide : fetch offscreen (cookie Cloudflare encore valide) ────
   try {
     const data = await fetchViaOffscreen(url);
     console.log('[LBC] ✓ fetch offscreen (sans fenêtre)');
     return data;
   } catch (e) {
-    if (looksLikeChallenge(e.message)) sawChallenge = true;
+    // Problème réseau/internet → on N'escalade PAS (inutile d'ouvrir un onglet
+    // et surtout pas de fausse alerte captcha). Erreur transitoire silencieuse.
+    if (isNetworkError(e)) {
+      console.warn(`[LBC] problème réseau (${e.message}) → aucune escalade`);
+      throw e;
+    }
     console.warn(`[LBC] fetch offscreen échoué (${e.message}) → renouvellement cookie via iframe`);
   }
 
-  // ── 2. Expérimental : renouveler le cookie via iframe offscreen (sans fenêtre) ──
+  // ── 2. Renouveler le cookie via iframe offscreen (sans fenêtre) ───────────
   try {
     const data = await renewViaIframeAndFetch(url);
     console.log('[LBC] ✓ renouvellement iframe offscreen (sans fenêtre)');
     return data;
   } catch (e) {
-    if (looksLikeChallenge(e.message)) sawChallenge = true;
-    console.warn(`[LBC] renouvellement iframe échoué (${e.message}) → fallback fenêtre éphémère`);
+    // Captcha confirmé par le content-script DANS l'iframe → notif sans ouvrir d'onglet.
+    if (e.captcha) {
+      console.log('[LBC] 🔐 captcha détecté via iframe (sans onglet)');
+      throw e;
+    }
+    if (isNetworkError(e)) {
+      console.warn(`[LBC] problème réseau (${e.message}) → aucune escalade`);
+      throw e;
+    }
+    console.warn(`[LBC] renouvellement iframe échoué (${e.message}) → rendu réel`);
   }
 
-  // ── 3. Filet de sécurité : fenêtre éphémère (créée puis fermée) ───────────
-  try {
-    const data = await fetchLeboncoinAdsViaTab(url);
-    console.log('[LBC] ✓ fenêtre éphémère');
-    return data;
-  } catch (e) {
-    if (e.captcha) throw e; // challenge confirmé par la fenêtre → déjà tagué
-    if (looksLikeChallenge(e.message)) sawChallenge = true;
-    // Si un niveau a vu un challenge mais qu'aucun n'a pu le franchir → captcha humain.
-    if (sawChallenge) throw Object.assign(new Error('Captcha leboncoin requis'), { captcha: true });
-    throw e; // erreur purement transitoire (réseau, timeout) → non notifiée
-  }
+  // ── 3. Rendu réel (onglet/fenêtre) : lève une erreur taguée {captcha:true}
+  //      UNIQUEMENT si une page de challenge est positivement détectée. ──────
+  const data = await fetchLeboncoinAdsViaTab(url);
+  console.log('[LBC] ✓ rendu réel');
+  return data;
 }
 
-/** Heuristique : ce message d'erreur évoque-t-il une page de challenge Cloudflare ? */
-function looksLikeChallenge(message = '') {
-  const m = message.toLowerCase();
+/** Le message/état évoque-t-il une coupure réseau plutôt qu'un blocage Cloudflare ? */
+function isNetworkError(e) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  const m = (e?.message ?? '').toLowerCase();
   return (
-    m.includes('challenge') ||
-    m.includes('captcha') ||
-    m.includes('cloudflare') ||
-    m.includes('http 403') ||
-    m.includes('http 503') ||
-    m.includes('__next_data__') // 200 sans __NEXT_DATA__ = page de challenge
+    m.includes('failed to fetch') ||
+    m.includes('networkerror') ||
+    m.includes('load failed') ||
+    m.includes('net::') ||
+    m.includes('err_internet') ||
+    m.includes('err_network') ||
+    m.includes('err_connection') ||
+    m.includes('err_name_not_resolved')
   );
 }
 
@@ -474,7 +488,9 @@ async function renewViaIframeAndFetch(url) {
     await ensureOffscreenDocument();
     const result = await chrome.runtime.sendMessage({ type: 'RENEW_VIA_IFRAME', url });
     if (result?.ok && result.data) return result.data;
-    throw new Error(result?.error ?? 'Réponse invalide du document offscreen');
+    const err = new Error(result?.error ?? 'Réponse invalide du document offscreen');
+    if (result?.captcha) err.captcha = true; // captcha détecté dans l'iframe (sans onglet)
+    throw err;
   } finally {
     await disableIframeHeaderStripping();
   }
@@ -571,11 +587,11 @@ async function runInCheckerContext(url) {
     } catch (_) { /* page non injectable (erreur réseau, about:blank) → injected=false */ }
 
     if (injected && Array.isArray(data)) return data;
-    // Injecté sur une page leboncoin sans __NEXT_DATA__ = challenge/captcha confirmé.
+    // Page de challenge Cloudflare positivement détectée → captcha à résoudre.
     if (injected && data && data.__challenge) {
       throw Object.assign(new Error('Captcha leboncoin requis'), { captcha: true });
     }
-    // Impossible d'injecter (page non chargée) → transitoire, pas un captcha.
+    // Sinon (injection impossible, page d'erreur, timeout) → transitoire, pas un captcha.
     if (timedOut) throw new Error('Timeout de chargement de la page (30 s)');
     throw new Error('Impossible de lire les données leboncoin (page inattendue ?)');
   } finally {
@@ -618,8 +634,9 @@ function extractLeboncoinDataFromPage() {
     } catch (_) { /* données illisibles → traité comme un challenge ci-dessous */ }
   }
 
-  // Page leboncoin chargée mais SANS __NEXT_DATA__ exploitable : la vraie page de
-  // recherche en contient toujours (même sans résultat), donc c'est forcément une
-  // page de challenge/captcha Cloudflare. On le signale pour notifier l'utilisateur.
+  // Page leboncoin chargée (injectable) mais SANS __NEXT_DATA__ exploitable : la
+  // vraie page de recherche en contient toujours, et les coupures réseau sont déjà
+  // filtrées en amont (isNetworkError). C'est donc une page de blocage/captcha,
+  // quel que soit le fournisseur (Cloudflare, DataDome…).
   return { __challenge: true };
 }
