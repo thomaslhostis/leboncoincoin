@@ -164,6 +164,34 @@ test('checkPage : nouvelles annonces → notif avec son', async () => {
   assert.ok(calls.sendMessage.some((m) => m.type === 'PLAY_QUACK'), 'son joué');
 });
 
+test('checkPage : annonce qui réapparaît après disparition → une seule notification', async () => {
+  let current = [];
+  const mock = makeChrome({
+    store: monitorsStore({ snapshots: { m1: { seen: ['A'] } } }), // déjà activé, A connu
+    sendMessage: scenario({ FETCH_LBC: () => ({ ok: true, data: current.map((id) => ({ id })) }) }),
+  });
+  const { ctx, store, calls } = loadBackground({ mock });
+
+  current = ['A', 'X']; await ctx.checkPage('m1'); // X apparaît → notif
+  current = ['A'];      await ctx.checkPage('m1'); // X retiré → rien
+  current = ['A', 'X']; await ctx.checkPage('m1'); // X réapparaît → ne doit PAS re-notifier
+
+  const adNotifs = calls.notifications.filter((n) => /nouvelle/.test(n.message || ''));
+  assert.equal(adNotifs.length, 1, 'une seule notification malgré la réapparition');
+  assert.ok(store.snapshots.m1.seen.includes('X'), 'X reste mémorisé même absent');
+});
+
+test('checkPage : rétrocompat ancien format snapshot {ids}', async () => {
+  const mock = makeChrome({
+    store: monitorsStore({ snapshots: { m1: { ids: ['1'] } } }),
+    sendMessage: scenario({ FETCH_LBC: { ok: true, data: [{ id: '1' }, { id: '2' }] } }),
+  });
+  const { ctx, store, calls } = loadBackground({ mock });
+  await ctx.checkPage('m1');
+  assert.ok(calls.notifications.some((n) => /1 nouvelle annonce/.test(n.message)));
+  assert.deepEqual(store.snapshots.m1.seen, ['1', '2'], 'migré vers le champ seen');
+});
+
 test('checkPage : captcha → notif unique "⚠️ Leboncoincoin" + icône warning, sans onglet', async () => {
   const mock = makeChrome({
     store: monitorsStore({ snapshots: { m1: { ids: ['1'] } } }),

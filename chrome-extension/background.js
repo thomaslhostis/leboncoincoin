@@ -2,6 +2,7 @@ const KEY_MONITORS = 'monitors';
 const KEY_SNAPSHOTS = 'snapshots';
 const KEY_NOTIF = 'notif_urls'; // maps notifId → URL to open on click
 const KEY_CAPTCHA_NOTIF = 'captcha_global_notified'; // notif captcha unique (globale)
+const MAX_SEEN_IDS = 1000; // borne mémoire des ids d'annonces déjà notifiés par surveillance
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -130,8 +131,13 @@ async function checkPage(monitorId) {
 
     const { [KEY_SNAPSHOTS]: snapshots = {} } = await chrome.storage.local.get(KEY_SNAPSHOTS);
     const prev = snapshots[monitorId];
-    const prevIds = prev?.ids ?? [];
     const isFirstCheck = !prev;
+    // Ids DÉJÀ vus/notifiés (et non plus seulement ceux du dernier check) : une
+    // annonce qui disparaît puis réapparaît ne redéclenche donc pas de notification.
+    // (rétrocompat : ancien format `ids`.)
+    const seen = prev?.seen ?? prev?.ids ?? [];
+    const seenSet = new Set(seen);
+    const currentIds = ads.map((a) => a.id);
 
     if (isFirstCheck) {
       // Première vérification : juste confirmer que la surveillance est active
@@ -142,7 +148,7 @@ async function checkPage(monitorId) {
         monitor.url,
       );
     } else {
-      const newAds = ads.filter((ad) => !prevIds.includes(ad.id));
+      const newAds = ads.filter((ad) => !seenSet.has(ad.id));
       if (newAds.length > 0) {
         const message =
           newAds.length === 1 ? `1 nouvelle annonce` : `${newAds.length} nouvelles annonces`;
@@ -151,7 +157,11 @@ async function checkPage(monitorId) {
       }
     }
 
-    snapshots[monitorId] = { ids: ads.map((a) => a.id), updatedAt: now };
+    // Met à jour la liste des ids connus : ids courants poussés en fin (récence),
+    // dédupliqués, tronqués aux MAX_SEEN_IDS plus récents (borne mémoire). Les ids
+    // retirés dérivent vers l'avant et finissent par sortir bien plus tard.
+    const merged = [...seen.filter((id) => !currentIds.includes(id)), ...currentIds];
+    snapshots[monitorId] = { seen: merged.slice(-MAX_SEEN_IDS), updatedAt: now };
     await chrome.storage.local.set({ [KEY_SNAPSHOTS]: snapshots });
 
     patch = { lastCheck: now, lastCount: ads.length, lastError: null, captchaNotified: false };
