@@ -51,6 +51,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     REMOVE_MONITOR:   () => removeMonitor(msg.monitorId),
     TOGGLE_MONITOR:   () => toggleMonitor(msg.monitorId, msg.enabled),
     UPDATE_FREQUENCY: () => updateFrequency(msg.monitorId, msg.frequency),
+    UPDATE_URL:       () => updateUrl(msg.monitorId, msg.url),
     CHECK_NOW:        () => checkPage(msg.monitorId),
   };
   const fn = handlers[msg.type];
@@ -114,6 +115,24 @@ async function updateFrequency(monitorId, frequency) {
     await chrome.alarms.clear(monitorId);
     chrome.alarms.create(monitorId, { periodInMinutes: frequency, delayInMinutes: 0.1 });
   }
+}
+
+async function updateUrl(monitorId, url) {
+  const { monitors = [], [KEY_SNAPSHOTS]: snapshots = {} } =
+    await chrome.storage.local.get([KEY_MONITORS, KEY_SNAPSHOTS]);
+  if (!monitors.some((m) => m.id === monitorId)) throw new Error('Surveillance introuvable');
+  if (monitors.some((m) => m.id !== monitorId && m.url === url)) throw new Error('URL déjà surveillée');
+
+  // Nouvelle recherche → on repart d'un état vierge : instantané réinitialisé (le
+  // prochain check sera un "premier check", sans notifier les annonces déjà là) et
+  // état d'erreur/captcha effacé.
+  delete snapshots[monitorId];
+  const updated = monitors.map((m) =>
+    (m.id === monitorId ? { ...m, url, lastError: null, captchaNotified: false } : m));
+
+  await chrome.storage.local.set({ [KEY_MONITORS]: updated, [KEY_SNAPSHOTS]: snapshots });
+  await refreshCaptchaState();
+  checkPage(monitorId); // vérifie immédiatement avec la nouvelle URL
 }
 
 // ── Page checking ─────────────────────────────────────────────────────────────

@@ -40,6 +40,17 @@ function showError(msg) {
   setTimeout(() => el.classList.add('hidden'), 4000);
 }
 
+/** Renvoie un message d'erreur si l'URL n'est pas une URL leboncoin.fr valide, sinon null. */
+function leboncoinUrlError(url) {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.endsWith('leboncoin.fr')) return 'Seules les URLs leboncoin.fr sont supportées.';
+    return null;
+  } catch (_) {
+    return 'URL invalide.';
+  }
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderMonitor(m) {
@@ -75,6 +86,7 @@ function renderMonitor(m) {
 
       <div class="item-actions">
         <button class="btn-sm btn-check js-check">Vérifier</button>
+        <button class="btn-sm btn-edit js-edit-url">Modifier l'URL</button>
         <button class="btn-sm btn-delete js-delete">Supprimer</button>
       </div>
     </div>
@@ -121,6 +133,18 @@ async function loadMonitors() {
       // Pas de reload : le select est déjà à jour visuellement
     });
 
+    el.querySelector('.js-edit-url').addEventListener('click', async () => {
+      const next = prompt('Nouvelle URL de la recherche :', el.dataset.url);
+      if (next === null) return; // annulé
+      const url = next.trim();
+      if (!url || url === el.dataset.url) return; // inchangé
+      const err = leboncoinUrlError(url);
+      if (err) { showError(err); return; }
+      const res = await chrome.runtime.sendMessage({ type: 'UPDATE_URL', monitorId: id, url });
+      if (res?.ok === false) { showError(res.error ?? 'Erreur lors de la modification.'); return; }
+      loadMonitors();
+    });
+
     el.querySelector('.js-delete').addEventListener('click', async () => {
       if (!confirm('Supprimer cette surveillance ?')) return;
       await chrome.runtime.sendMessage({ type: 'REMOVE_MONITOR', monitorId: id });
@@ -137,15 +161,9 @@ document.getElementById('addForm').addEventListener('submit', async (e) => {
 
   const url = document.getElementById('url').value.trim();
 
-  // Validate leboncoin URL
-  try {
-    const parsed = new URL(url);
-    if (!parsed.hostname.endsWith('leboncoin.fr')) {
-      showError('Seules les URLs leboncoin.fr sont supportées.');
-      return;
-    }
-  } catch (_) {
-    showError('URL invalide.');
+  const urlError = leboncoinUrlError(url);
+  if (urlError) {
+    showError(urlError);
     return;
   }
 

@@ -264,6 +264,45 @@ test('checkPage : rétablissement → icône normale, flag reset, pas de notif "
   assert.ok(!calls.notifications.some((n) => /de nouveau accessible/i.test(n.message)), 'pas de notif de récupération');
 });
 
+// ── updateUrl ───────────────────────────────────────────────────────────────────
+
+test('updateUrl : change l’URL, réinitialise l’instantané et efface erreur/captcha', async () => {
+  const mock = makeChrome({
+    store: {
+      monitors: [{ id: 'm1', name: 'A', url: URL1, enabled: true, frequency: 5, lastError: 'HTTP 403', captchaNotified: true }],
+      snapshots: { m1: { seen: ['old1', 'old2'] } },
+      captcha_global_notified: true,
+    },
+    sendMessage: scenario({ FETCH_LBC: { ok: true, data: [{ id: 'new1' }] } }),
+  });
+  const { ctx, store, calls } = loadBackground({ mock });
+  const NEW = 'https://www.leboncoin.fr/recherche?text=metal';
+  await ctx.updateUrl('m1', NEW);
+  await delay(20); // laisse le checkPage déclenché se terminer
+
+  assert.equal(store.monitors[0].url, NEW);
+  assert.equal(store.monitors[0].lastError, null);
+  assert.equal(store.monitors[0].captchaNotified, false);
+  assert.ok(calls.notifications.some((n) => n.title.includes('Surveillance activée')), 'prochain check = premier check');
+  assert.ok(!calls.notifications.some((n) => /nouvelle annonce/.test(n.message || '')), 'pas de spam d’annonces');
+  assert.deepEqual(store.snapshots.m1.seen, ['new1'], 'instantané reconstruit pour la nouvelle URL');
+});
+
+test('updateUrl : refuse une URL déjà surveillée par une autre alerte', async () => {
+  const mock = makeChrome({ store: { monitors: [
+    { id: 'm1', name: 'A', url: URL1, enabled: true, frequency: 5 },
+    { id: 'm2', name: 'B', url: 'https://www.leboncoin.fr/x', enabled: true, frequency: 5 },
+  ] } });
+  const { ctx } = loadBackground({ mock });
+  await assert.rejects(() => ctx.updateUrl('m1', 'https://www.leboncoin.fr/x'), /déjà surveillée/);
+});
+
+test('updateUrl : refuse une surveillance inconnue', async () => {
+  const mock = makeChrome({ store: { monitors: [] } });
+  const { ctx } = loadBackground({ mock });
+  await assert.rejects(() => ctx.updateUrl('zzz', URL1), /introuvable/);
+});
+
 // ── onLeboncoinAccessible ───────────────────────────────────────────────────────
 
 test('onLeboncoinAccessible : efface l’avertissement (icône + état) après le signal', async () => {

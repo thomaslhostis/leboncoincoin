@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Leboncoincoin",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "Reçois des notifications dès qu'une nouvelle annonce apparaît sur leboncoin.",
   "permissions": [
     "alarms",
